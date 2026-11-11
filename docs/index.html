@@ -178,12 +178,17 @@
           <button data-nudge="-1,0">←</button><button data-nudge="1,0">→</button>
           <button id="centerBtn" style="flex:2">Centralizar</button>
         </div>
-        <label>Tamanho: <b id="scaleVal">100%</b></label>
-        <input type="range" id="scale" min="5" max="300" value="100">
+        <label>Tamanho (100% = ocupa o torso): <b id="scaleVal">70%</b></label>
+        <input type="range" id="scale" min="2" max="250" value="70">
         <label>Rotação: <b id="rotVal">0°</b></label>
         <input type="range" id="rot" min="-180" max="180" value="0">
         <label>Opacidade: <b id="opVal">100%</b></label>
         <input type="range" id="op" min="0" max="100" value="100">
+        <label>Qualidade ao redimensionar</label>
+        <select id="logoQuality">
+          <option value="smooth">Suave (anti-aliasing, alta qualidade)</option>
+          <option value="pixel">Pixel art (bordas duras, sem suavizar)</option>
+        </select>
       </div>
 
       <div class="sub">
@@ -278,7 +283,12 @@ const BUILTIN_OVERLAYS = [
 
 function newLayer(region){
   const r = REGIONS[region];
-  return {img:null, x:r.x+r.w/2, y:r.y+r.h/2, scale:1, rot:0, opacity:1, region};
+  return {img:null, x:r.x+r.w/2, y:r.y+r.h/2, size:70, rot:0, opacity:1, region};
+}
+// escala real: size% do maior encaixe da logo dentro da região (torso 128x128)
+function eff(L,img){
+  if(!img) return 1; const r=REGIONS[L.region];
+  return L.size/100*Math.min(r.w/img.width, r.h/img.height);
 }
 const state = {
   base:null, baseMean:0.5,
@@ -334,7 +344,7 @@ setupDrop('logoDrop','logoFile',(img,url)=>{
   const L = layer();
   L.img = img;
   const r=REGIONS[L.region];
-  L.scale = Math.min(1,(r.w*0.7)/img.width,(r.h*0.7)/img.height);
+  L.size = 70;
   $('logoThumb').src=url; $('logoThumb').hidden=false;
   tintCache=new WeakMap(); syncControls(); refreshAll();
 });
@@ -385,11 +395,37 @@ function tinted(img, hex){
   x.globalCompositeOperation='source-in'; x.fillStyle=hex; x.fillRect(0,0,c.width,c.height);
   m.set(hex,c); return c;
 }
+/* Redução em etapas (metade por vez) com suavização de alta qualidade:
+   evita serrilhado e perda de detalhes ao encolher logos grandes. */
+let resampleCache = new WeakMap();
+function resampled(img, w, h){
+  const pixel = $('logoQuality').value==='pixel';
+  const key = w+'x'+h+(pixel?'p':'s');
+  let m=resampleCache.get(img); if(!m){ m=new Map(); resampleCache.set(img,m); }
+  if (m.has(key)) return m.get(key);
+  if (m.size>40) m.clear();
+  const step=(src,sw,sh)=>{
+    const c=document.createElement('canvas'); c.width=sw; c.height=sh;
+    const x=c.getContext('2d');
+    x.imageSmoothingEnabled=!pixel; x.imageSmoothingQuality='high';
+    x.drawImage(src,0,0,sw,sh); return c;
+  };
+  let cur=img, cw=img.width, ch=img.height;
+  if (!pixel) while (cw/2>=w && ch/2>=h){ cw=Math.max(w,Math.floor(cw/2)); ch=Math.max(h,Math.floor(ch/2)); cur=step(cur,cw,ch); }
+  cur=step(cur,w,h);
+  m.set(key,cur); return cur;
+}
 function drawLayer(ctx, L, img, logoHex){
   if (!img) return;
-  const src=tinted(img,logoHex);
-  ctx.save(); ctx.globalAlpha=L.opacity; ctx.translate(L.x,L.y); ctx.rotate(L.rot*Math.PI/180); ctx.scale(L.scale,L.scale);
-  ctx.drawImage(src,-src.width/2,-src.height/2); ctx.restore();
+  const k=eff(L,img);
+  const w=Math.max(1,Math.round(img.width*k)), h=Math.max(1,Math.round(img.height*k));
+  const src=tinted(resampled(img,w,h),logoHex);
+  ctx.save(); ctx.globalAlpha=L.opacity;
+  ctx.imageSmoothingEnabled=$('logoQuality').value!=='pixel'; ctx.imageSmoothingQuality='high';
+  ctx.translate(L.x,L.y); ctx.rotate(L.rot*Math.PI/180);
+  // sem rotação, alinha ao pixel inteiro para não borrar
+  const dx = L.rot%360===0 ? Math.round(L.x-w/2)-L.x : -w/2, dy = L.rot%360===0 ? Math.round(L.y-h/2)-L.y : -h/2;
+  ctx.drawImage(src,dx,dy,w,h); ctx.restore();
 }
 function backImg(){ return state.backMode==='none'?null : state.backMode==='same'?state.front.img : state.back.img; }
 
@@ -434,7 +470,7 @@ function drawEditor(){
     ectx.save(); ectx.setLineDash([4,4]); ectx.strokeStyle=k===state.active?'#cc9166':'#cc916655';
     ectx.strokeRect(r.x+.5,r.y+.5,r.w,r.h); ectx.restore();
     if (img){
-      const w=img.width*L.scale,h=img.height*L.scale;
+      const w=img.width*eff(L,img),h=img.height*eff(L,img);
       ectx.save(); ectx.translate(L.x,L.y); ectx.rotate(L.rot*Math.PI/180);
       ectx.setLineDash([3,3]); ectx.strokeStyle=k===state.active?'#ffffff':'#ffffff55'; ectx.strokeRect(-w/2,-h/2,w,h); ectx.restore();
     }
@@ -445,7 +481,7 @@ function hit(L,img,x,y){
   if(!img) return false;
   const a=-L.rot*Math.PI/180, dx=x-L.x, dy=y-L.y;
   const rx=dx*Math.cos(a)-dy*Math.sin(a), ry=dx*Math.sin(a)+dy*Math.cos(a);
-  return Math.abs(rx)<=img.width*L.scale/2 && Math.abs(ry)<=img.height*L.scale/2;
+  const k=eff(L,img); return Math.abs(rx)<=img.width*k/2 && Math.abs(ry)<=img.height*k/2;
 }
 let drag=null;
 editor.addEventListener('pointerdown',e=>{
@@ -463,7 +499,7 @@ editor.addEventListener('pointermove',e=>{
 });
 editor.addEventListener('pointerup',()=>{ if(drag){drag=null; renderGrid();} });
 editor.addEventListener('wheel',e=>{
-  e.preventDefault(); let v=+$('scale').value+(e.deltaY<0?2:-2); v=Math.max(5,Math.min(300,v));
+  e.preventDefault(); let v=+$('scale').value+(e.deltaY<0?2:-2); v=Math.max(2,Math.min(250,v));
   $('scale').value=v; $('scale').dispatchEvent(new Event('input'));
 },{passive:false});
 document.addEventListener('keydown',e=>{
@@ -490,7 +526,7 @@ function updateLayerUI(){
 function syncControls(){
   const L=layer();
   $('lx').value=$('lxN').value=Math.round(L.x); $('ly').value=$('lyN').value=Math.round(L.y);
-  $('scale').value=Math.round(L.scale*100); $('scaleVal').textContent=$('scale').value+'%';
+  $('scale').value=L.size; const im=state.active==='front'?L.img:backImg(); $('scaleVal').textContent=L.size+'%'+(im?' · '+Math.round(im.width*eff(L,im))+'×'+Math.round(im.height*eff(L,im))+'px':'');
   $('rot').value=L.rot; $('rotVal').textContent=L.rot+'°';
   $('op').value=Math.round(L.opacity*100); $('opVal').textContent=$('op').value+'%';
 }
@@ -498,7 +534,7 @@ $('tabFront').onclick=()=>setActive('front');
 $('tabBack').onclick=()=>setActive('back');
 $('backMode').onchange=e=>{
   state.backMode=e.target.value;
-  if (state.backMode==='same'){ Object.assign(state.back,{scale:state.front.scale,rot:state.front.rot,opacity:state.front.opacity}); }
+  if (state.backMode==='same'){ Object.assign(state.back,{size:state.front.size,rot:state.front.rot,opacity:state.front.opacity}); }
   updateLayerUI(); syncControls(); refreshAll();
 };
 const bindPos=(rangeId,numId,prop)=>{
@@ -508,12 +544,13 @@ const bindPos=(rangeId,numId,prop)=>{
 bindPos('lx','lxN','x'); bindPos('ly','lyN','y');
 document.querySelectorAll('[data-nudge]').forEach(b=>b.onclick=()=>{ const [dx,dy]=b.dataset.nudge.split(',').map(Number); nudge(dx,dy); });
 $('centerBtn').onclick=()=>{ const L=layer(), r=REGIONS[L.region]; L.x=r.x+r.w/2; L.y=r.y+r.h/2; syncControls(); refreshAll(); };
-$('scale').oninput=e=>{ layer().scale=e.target.value/100; syncControls(); drawEditor(); debounceGrid(); };
+$('scale').oninput=e=>{ layer().size=+e.target.value; syncControls(); drawEditor(); debounceGrid(); };
 $('rot').oninput  =e=>{ layer().rot=+e.target.value; syncControls(); drawEditor(); debounceGrid(); };
 $('op').oninput   =e=>{ layer().opacity=e.target.value/100; syncControls(); drawEditor(); debounceGrid(); };
 $('fold').oninput =e=>{ $('foldVal').textContent=e.target.value+'%'; drawEditor(); debounceGrid(); };
 $('ovOp').oninput =e=>{ $('ovOpVal').textContent=e.target.value+'%'; drawEditor(); debounceGrid(); };
 $('mode').onchange=refreshAll;
+$('logoQuality').onchange=refreshAll;
 $('logoColorMode').onchange=e=>{ $('logoListBox').hidden=e.target.value!=='list'; refreshAll(); };
 $('skipSame').onchange=refreshAll;
 $('previewSel').onchange=e=>{ e.target.dataset.touched='1'; drawEditor(); };
@@ -584,7 +621,7 @@ $('saveZip').onclick=async()=>{
       const blob=await new Promise(r=>compose(vars[i].shirt,vars[i].logo).toBlob(r,'image/png'));
       zip.file(fileName(vars[i],i),blob);
     }
-    const lay=L=>({x:L.x,y:L.y,scale:L.scale,rotation:L.rot,opacity:L.opacity});
+    const lay=L=>({x:L.x,y:L.y,tamanho:L.size,rotation:L.rot,opacity:L.opacity});
     zip.file('config.json',JSON.stringify({kind:$('kind').value,base:$('baseSel').value.replace(/^custom:.*/,'enviada'),
       overlay:$('ovSel').value.replace(/^custom:.*/,'enviado'),mode:$('mode').value,dobras:+$('fold').value,
       frente:lay(state.front),costas:{modo:state.backMode,...lay(state.back)},
